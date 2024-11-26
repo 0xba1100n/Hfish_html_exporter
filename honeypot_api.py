@@ -209,7 +209,12 @@ try:
         high_value_exp_file.write(f"<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>可能的高价值exp</title>{GLOBAL_STYLE}</head><body>")
         high_value_exp_file.write(HEADER_IMAGE_HTML)  # 插入头图
         high_value_exp_file.write("<h1>可能的高价值exp</h1>")
-        for request in high_value_exp_requests:
+        sorted_requests = sorted(
+        high_value_exp_requests,
+        key=lambda x: datetime.strptime(x["create_time"], "%Y-%m-%d %H:%M:%S"),
+        reverse=True
+        )
+        for request in sorted_requests:
             high_value_exp_file.write(f"<div style='border:1px solid black; margin:10px; padding:10px;'>")
             high_value_exp_file.write(f"<p><strong>蜜罐种类:</strong> {html.escape(request['service_name'])}</p>")
             high_value_exp_file.write(f"<p><strong>踩罐源IP:</strong> {html.escape(request['attack_ip'])}</p>")
