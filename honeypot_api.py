@@ -1,9 +1,9 @@
 import os
 import requests
 import json
+import html
 from datetime import datetime
 import urllib3
-import html
 import argparse
 from pypinyin import lazy_pinyin
 
@@ -12,80 +12,61 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 def safe_filename(name):
     """将名称转为拼音，并去除非法字符"""
-    return ''.join(lazy_pinyin(name))
+    sanitized_name = ''.join(lazy_pinyin(name))
+    print(f"[调试] 文件名转换: 原名: {name}, 转换后: {sanitized_name}")
+    return sanitized_name
+
+def write_html_header(file, title):
+    """生成 HTML 页头"""
+    file.write("<!DOCTYPE html>\n<html lang='zh-CN'>\n<head>\n")
+    file.write("<meta charset='UTF-8'>\n")
+    file.write(f"<title>{title}</title>\n")
+    file.write("<style>\n")
+    file.write("body { font-family: Arial, sans-serif; line-height: 1.6; padding: 20px; }\n")
+    file.write("h1, h2 { color: #333; }\n")
+    file.write("ul { list-style-type: none; padding: 0; }\n")
+    file.write("li { margin-bottom: 15px; padding: 10px; border-bottom: 1px solid #ddd; }\n")
+    file.write("strong { color: #555; }\n")
+    file.write("pre { background-color: #f4f4f4; padding: 10px; border: 1px solid #ccc; overflow-x: auto; }\n")
+    file.write("table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }\n")
+    file.write("table, th, td { border: 1px solid #ddd; padding: 8px; }\n")
+    file.write("th { background-color: #f4f4f4; text-align: left; }\n")
+    file.write("</style>\n")
+    file.write("</head>\n<body>\n")
+
+def write_html_footer(file):
+    """生成 HTML 页脚"""
+    file.write("</body>\n</html>\n")
+
+def render_attack_info_html(attack_info):
+    """将攻击信息以更可读的方式渲染为 HTML"""
+    if isinstance(attack_info, str):
+        try:
+            attack_info = json.loads(attack_info)
+        except json.JSONDecodeError:
+            return f"<pre>{html.escape(attack_info)}</pre>"
+
+    html_content = "<table>\n"
+    for key, value in attack_info.items():
+        if isinstance(value, dict):
+            value = json.dumps(value, ensure_ascii=False, indent=2)
+        elif isinstance(value, list):
+            value = ', '.join(map(str, value))
+        html_content += f"<tr><th>{html.escape(key)}</th><td>{html.escape(str(value))}</td></tr>\n"
+    html_content += "</table>\n"
+    return html_content
 
 # 恶意关键字列表
 MALICIOUS_KEYWORDS = [
-    "wget", "curl", "rm -rf", "chmod", "powershell", "phpinfo", "system(", "ping", "nslookup","tracert","traceroute",
-    ".cgi", ".sh", "/etc/passwd","/etc/shadow","../../","entity","admin","<?","file://","ftp"#,"login", "logon"
+    "wget", "curl", "rm -rf", "chmod", "shell", "phpinfo", "system", "eval","execve",
+    "\.cgi", "\.sh", "/etc/passwd", "\.\./\.\./", "entity", "admin", "\<\?", "file://", "ftp","ls -a","uname -a"
 ]
-
-"""
-- wget、curl：常用于下载恶意文件或脚本。    
-- rm -rf：用于删除文件或目录，可能导致破坏性操作。    
-- chmod：用于修改权限，可能用于提升权限或执行恶意文件。    
-- powershell：Windows系统中强大的脚本工具，常用于渗透测试或恶意脚本执行。    
-- system(：PHP中执行系统命令的函数，常见于命令注入攻击。
-- phpinfo：PHP内置函数，攻击者可能利用它获取服务器配置信息。    
-- /etc/passwd、/etc/shadow：Linux系统的敏感文件路径，读取这些文件通常意味着目录遍历攻击或权限提升尝试。    
-- ../../：路径遍历攻击的常见模式，尝试访问服务器的敏感文件。
-- ping、nslookup、tracert、traceroute：用于网络侦察，可能是攻击者探测服务器的网络环境或路径。
-- .cgi：CGI脚本文件，在一些老旧系统中容易被利用。    
-- .sh：表示Shell脚本文件，可能用于执行恶意代码。    
-- entity：与XML实体注入相关，可能导致XXE攻击。    
-- admin、login、logon：针对管理面板或登录页面的暴力破解或未授权访问尝试。目前只使用了admin,开启另外两个可能有意想不到的收获
-- "<?"：写入某种php木马的行为
-等等
-"""
-
 
 # 请求大小阈值（字节数）
 LARGE_REQUEST_THRESHOLD = 500
 
-# 头图HTML代码
-HEADER_IMAGE_HTML = '''
-<img src="https://balloonblogsrcs.oss-cn-shanghai.aliyuncs.com/20241122202810.png" alt="ba1100n Banner" style="width:100%; margin-bottom: 20px;">
-'''
-
-# 全局样式
-GLOBAL_STYLE = '''
-<style>
-    body {
-        font-size: 14px;
-        font-family: Arial, sans-serif;
-        margin: 0;
-        padding: 0;
-        line-height: 1.6;
-    }
-    pre {
-        font-family: monospace;
-        background-color: #f4f4f4;
-        padding: 10px;
-        overflow-x: auto;
-        border: 1px solid #ddd;
-    }
-    button {
-        font-size: 14px;
-        padding: 10px;
-        margin: 5px 0;
-        border: none;
-        background-color: #007bff;
-        color: white;
-        cursor: pointer;
-    }
-    button:hover {
-        background-color: #0056b3;
-    }
-    h1 {
-        font-size: 20px;
-        color: #333;
-        margin-bottom: 20px;
-    }
-</style>
-'''
-
 # 解析命令行参数
-parser = argparse.ArgumentParser(description="从API获取攻击详情并生成按蜜罐种类和日期分组的HTML文件，并记录可能的高价值exp")
+parser = argparse.ArgumentParser(description="从API获取攻击详情并生成按蜜罐种类和日期分组的HTML文件，并记录包含高风险字符的蜜罐抓取结果")
 parser.add_argument('--api_key', required=True, help='API密钥')
 parser.add_argument('--hfish_domain', required=True, help='Hfish的域名或IP地址')
 parser.add_argument('--output_dir', required=True, help='HTML文件保存路径')
@@ -111,11 +92,11 @@ else:
 
 # 存储每种蜜罐种类和日期的攻击详情
 service_date_data = {}
-# 存储“可能的高价值exp”相关请求的全局列表
-high_value_exp_requests = []
+# 存储“包含高风险字符的蜜罐抓取结果”相关请求的全局列表
+high_risk_requests = []
 
 try:
-    for page_no in range(1, 21):  # 遍历 1 到 20 页
+    for page_no in range(1, 100000):  # 扩展分页范围，处理更多数据
         payload = {
             "start_time": 0,
             "end_time": 0,
@@ -125,124 +106,161 @@ try:
             "service_name": [],
             "info_confirm": "1"
         }
-        response = requests.post(url, headers=headers, json=payload, verify=False, timeout=10)
+        response = requests.post(url, headers=headers, json=payload, verify=False, timeout=30)
+        response.raise_for_status()
 
-        if response.status_code != 200:
-            print(f"Page {page_no} 请求失败，状态码 {response.status_code}。")
-            break
         response.encoding = 'utf-8'
         data = response.json()
+
         if data.get("response_code") != 0:
-            print(f"API 在第 {page_no} 页返回错误: {data.get('verbose_msg')}")
+            print(f"[警告] API 在第 {page_no} 页返回错误: {data.get('verbose_msg')}")
+            continue
+
+        detail_list = data.get("data", {}).get("detail_list", [])
+        if not detail_list:
+            print(f"[信息] 第 {page_no} 页没有数据，结束循环。")
             break
 
-        detail_list = data["data"]["detail_list"]
-        if not detail_list:
-            print(f"第 {page_no} 页没有数据，结束循环。")
-            break
+        print(f"[调试] 第 {page_no} 页包含 {len(detail_list)} 条数据。")
 
         for detail in detail_list:
-            service_name = detail["service_name"]
-            create_date = datetime.fromtimestamp(detail["create_time"]).strftime("%Y-%m-%d")  # 提取日期
-
-            if service_name not in service_date_data:
-                service_date_data[service_name] = {}
-
-            if create_date not in service_date_data[service_name]:
-                service_date_data[service_name][create_date] = []
-
-            service_date_data[service_name][create_date].append(detail)
-
-            # 检测可能的高价值exp关键字和大数据包
-            attack_info_raw = detail["attack_info"].strip()
             try:
-                attack_info = json.loads(attack_info_raw)
-            except json.JSONDecodeError:
-                attack_info = {"raw_content": attack_info_raw}
+                service_name = detail["service_name"]
+                create_date = datetime.fromtimestamp(detail["create_time"]).strftime("%Y-%m-%d %H:%M:%S")
 
-            body = attack_info.get("body", "").lower()
-            url_path = attack_info.get("url", "").lower()
-            body_length = len(body)
-            url_length = len(url_path)
+                if service_name not in service_date_data:
+                    service_date_data[service_name] = {}
 
-            # 检查是否命中恶意关键字
-            if (
-                any(keyword in body for keyword in MALICIOUS_KEYWORDS) or 
-                any(keyword in url_path for keyword in MALICIOUS_KEYWORDS)
-            ) or (
-                body_length > LARGE_REQUEST_THRESHOLD or url_length > LARGE_REQUEST_THRESHOLD
-            ):
-                high_value_exp_requests.append({
-                    "service_name": service_name,
-                    "attack_ip": detail["attack_ip"],
-                    "ip_location": detail["ip_location"],
-                    "create_time": datetime.fromtimestamp(detail["create_time"]).strftime("%Y-%m-%d %H:%M:%S"),
-                    "method": attack_info.get("method", "").upper(),
-                    "url": url_path,
-                    "body": body,
-                    "body_length": body_length,
-                    "url_length": url_length
-                })
+                if create_date[:10] not in service_date_data[service_name]:
+                    service_date_data[service_name][create_date[:10]] = []
 
-    # 为每种蜜罐种类生成按日期分组的HTML页面
+                service_date_data[service_name][create_date[:10]].append(detail)
+
+                # 检测包含高风险字符的请求
+                attack_info_raw = detail["attack_info"].strip()
+                try:
+                    attack_info = json.loads(attack_info_raw)
+                except json.JSONDecodeError:
+                    print(f"[警告] 攻击详情解析 JSON 失败，原始内容: {attack_info_raw}")
+                    attack_info = {"raw_content": attack_info_raw}
+
+                body = attack_info.get("body", "").lower()
+                url_path = attack_info.get("url", "").lower()
+                body_length = len(body)
+                url_length = len(url_path)
+
+                if (
+                    any(keyword in body for keyword in MALICIOUS_KEYWORDS) or
+                    any(keyword in url_path for keyword in MALICIOUS_KEYWORDS) or
+                    body_length > LARGE_REQUEST_THRESHOLD or url_length > LARGE_REQUEST_THRESHOLD
+                ):
+                    high_risk_requests.append({
+                        "service_name": service_name,
+                        "attack_ip": detail["attack_ip"],
+                        "ip_location": detail["ip_location"],
+                        "create_time": create_date,
+                        "attack_info": attack_info
+                    })
+                    print(f"[包含高风险字符的蜜罐抓取结果] 服务名: {service_name}, 攻击IP: {detail['attack_ip']}，时间: {create_date}")
+
+            except Exception as e:
+                print(f"[错误] 写入数据时发生异常: {e}")
+                continue
+
+    # 输出 service_date_data 调试信息
     for service_name, date_data in service_date_data.items():
-        # 对蜜罐种类名进行拼音转换，生成安全路径
-        encoded_service_name = safe_filename(service_name)
-        service_dir = os.path.join(output_dir, encoded_service_name)
+        print(f"[调试] 服务名: {service_name}")
+        for date, details in date_data.items():
+            print(f"[调试] 日期: {date} 包含 {len(details)} 条记录")
+
+    # 生成总的 index.html
+    index_path = os.path.join(output_dir, "index.html")
+    print(f"[调试] 准备生成总索引文件: {index_path}")
+    with open(index_path, "w", encoding="utf-8") as index_file:
+        write_html_header(index_file, "蜜罐攻击详情索引")
+        index_file.write("<h1>蜜罐攻击详情索引</h1>\n<ul>\n")
+        index_file.write("<h2>包含高风险字符的蜜罐抓取结果</h2>\n")
+        index_file.write(f"<p><a href='high_risk_requests.html'>查看包含高风险字符的蜜罐抓取结果</a></p>\n")
+        index_file.write("<h2>蜜罐种类索引</h2>\n")
+        for service_name in service_date_data.keys():
+            service_dir_name = safe_filename(service_name)
+            index_file.write(f"<li><a href='{service_dir_name}/index.html'>{service_name}</a></li>\n")
+        index_file.write("</ul>\n")
+        write_html_footer(index_file)
+        print(f"[调试] 总索引文件生成成功: {index_path}")
+
+    # 为每个服务生成专属的索引页
+    for service_name, date_data in service_date_data.items():
+        service_dir = os.path.join(output_dir, safe_filename(service_name))
         if not os.path.exists(service_dir):
             os.makedirs(service_dir)
+            print(f"[调试] 创建目录: {service_dir}")
+        else:
+            print(f"[调试] 目录已存在: {service_dir}")
 
-        # 生成该蜜罐种类的日期索引页面
-        index_file_path = os.path.join(service_dir, "index.html")
-        with open(index_file_path, "w", encoding="utf-8") as index_file:
-            index_file.write(f"<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>{html.escape(service_name)} 索引</title>{GLOBAL_STYLE}</head><body>")
-            index_file.write(HEADER_IMAGE_HTML)  # 插入头图
-            index_file.write(f"<h1>{html.escape(service_name)} 蜜罐日期索引</h1>")
-            # 按日期从新到旧排序
-            for create_date in sorted(date_data.keys(), reverse=True):  # reverse=True 使日期降序排列
-                index_file.write(f"<button onclick=\"window.location.href='{create_date}.html'\">{create_date}</button><br>")
-            index_file.write("</body></html>")
+        service_index_path = os.path.join(service_dir, "index.html")
+        with open(service_index_path, "w", encoding="utf-8") as service_index_file:
+            write_html_header(service_index_file, f"{service_name} - 攻击详情索引")
+            service_index_file.write(f"<h1>{service_name} - 攻击详情索引</h1>\n<ul>\n")
+            for date in sorted(date_data.keys()):
+                date_file_path = f"{date}.html"
+                service_index_file.write(f"<li><a href='{date_file_path}'>{date}</a></li>\n")
+            service_index_file.write("</ul>\n")
+            write_html_footer(service_index_file)
+        print(f"[调试] 服务索引文件生成成功: {service_index_path}")
 
-    # 生成“可能的高价值exp”页面
-    high_value_exp_file_path = os.path.join(output_dir, "high_value_exp.html")
-    with open(high_value_exp_file_path, "w", encoding="utf-8") as high_value_exp_file:
-        high_value_exp_file.write(f"<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>可能的高价值exp</title>{GLOBAL_STYLE}</head><body>")
-        high_value_exp_file.write(HEADER_IMAGE_HTML)  # 插入头图
-        high_value_exp_file.write("<h1>可能的高价值exp</h1>")
-        sorted_requests = sorted(
-        high_value_exp_requests,
-        key=lambda x: datetime.strptime(x["create_time"], "%Y-%m-%d %H:%M:%S"),
-        reverse=True
-        )
-        for request in sorted_requests:
-            high_value_exp_file.write(f"<div style='border:1px solid black; margin:10px; padding:10px;'>")
-            high_value_exp_file.write(f"<p><strong>蜜罐种类:</strong> {html.escape(request['service_name'])}</p>")
-            high_value_exp_file.write(f"<p><strong>踩罐源IP:</strong> {html.escape(request['attack_ip'])}</p>")
-            high_value_exp_file.write(f"<p><strong>IP归属地:</strong> {html.escape(request['ip_location'])}</p>")
-            high_value_exp_file.write(f"<p><strong>时间:</strong> {html.escape(request['create_time'])}</p>")
-            high_value_exp_file.write("<pre>")
-            high_value_exp_file.write(html.escape(f"{request['method']} {request['url']}\n"))
-            high_value_exp_file.write(html.escape(f"\n{request['body']}"))
-            high_value_exp_file.write("</pre>")
-            high_value_exp_file.write("</div>")
-        high_value_exp_file.write("</body></html>")
+    # 生成每个服务的日期 HTML 文件
+    for service_name, date_data in service_date_data.items():
+        service_dir = os.path.join(output_dir, safe_filename(service_name))
 
-    # 生成总索引页面
-    index_file_path = os.path.join(output_dir, "index.html")
-    with open(index_file_path, "w", encoding="utf-8") as index_file:
-        index_file.write(f"<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>蜜罐种类索引</title>{GLOBAL_STYLE}</head><body>")
-        index_file.write(HEADER_IMAGE_HTML)  # 插入头图
-        index_file.write("<h1>蜜罐结果筛选</h1>")  # 添加筛选标题
-        index_file.write(f"<button onclick=\"window.location.href='high_value_exp.html'\">可能的高价值exp</button><br><hr>")
-        index_file.write("<h2>各型蜜罐结果（已按日期分类）</h2>")  # 插入新标题
-        for service_name in service_date_data.keys():
-            encoded_service_name = safe_filename(service_name)
-            index_file.write(f"<button onclick=\"window.location.href='{encoded_service_name}/index.html'\">{html.escape(service_name)}</button><br>")
-        index_file.write("</body></html>")
+        for date, details in date_data.items():
+            file_path = os.path.join(service_dir, f"{date}.html")
+            print(f"[调试] 准备生成文件: {file_path}，包含 {len(details)} 条记录")
 
-    print(f"HTML 文件按蜜罐种类和日期生成，并保存到目录 {output_dir}。索引页面已生成。“可能的高价值exp”页面已生成。")
+            try:
+                with open(file_path, "w", encoding="utf-8") as file:
+                    write_html_header(file, f"{service_name} - {date}")
+                    file.write(f"<h1>{service_name} - {date}</h1>\n<ul>\n")
+                    for detail in details:
+                        attack_ip = detail.get("attack_ip", "N/A")
+                        ip_location = detail.get("ip_location", "N/A")
+                        create_time = datetime.fromtimestamp(detail["create_time"]).strftime("%Y-%m-%d %H:%M:%S")
+                        attack_info = detail.get("attack_info", "")
 
-except requests.exceptions.RequestException as e:
-    print(f"请求失败: {e}")
+                        file.write("<li>\n")
+                        file.write(f"<p><strong>攻击IP:</strong> {attack_ip}</p>\n")
+                        file.write(f"<p><strong>IP位置:</strong> {ip_location}</p>\n")
+                        file.write(f"<p><strong>时间:</strong> {create_time}</p>\n")
+                        file.write(render_attack_info_html(attack_info))
+                        file.write("</li>\n")
+                    file.write("</ul>\n")
+                    write_html_footer(file)
+                print(f"[调试] 成功生成文件: {file_path}")
+            except Exception as e:
+                print(f"[错误] 写入文件失败: {file_path}, 异常: {e}")
+
+    # 对包含高风险字符的请求按时间倒序排列
+    high_risk_requests.sort(key=lambda x: x['create_time'], reverse=True)
+
+    # 生成包含高风险字符的蜜罐抓取结果的 HTML 文件
+    high_risk_path = os.path.join(output_dir, "high_risk_requests.html")
+    print(f"[调试] 准备生成包含高风险字符的蜜罐抓取结果文件: {high_risk_path}")
+    with open(high_risk_path, "w", encoding="utf-8") as high_risk_file:
+        write_html_header(high_risk_file, "包含高风险字符的蜜罐抓取结果")
+        high_risk_file.write("<h1>包含高风险字符的蜜罐抓取结果</h1>\n<ul>\n")
+        for exp in high_risk_requests:
+            high_risk_file.write("<li>\n")
+            high_risk_file.write(f"<p><strong>服务名:</strong> {html.escape(exp['service_name'])}</p>\n")
+            high_risk_file.write(f"<p><strong>攻击IP:</strong> {html.escape(exp['attack_ip'])}</p>\n")
+            high_risk_file.write(f"<p><strong>IP位置:</strong> {html.escape(exp['ip_location'])}</p>\n")
+            high_risk_file.write(f"<p><strong>时间:</strong> {exp['create_time']}</p>\n")
+            high_risk_file.write(render_attack_info_html(exp['attack_info']))
+            high_risk_file.write("</li>\n")
+        high_risk_file.write("</ul>\n")
+        write_html_footer(high_risk_file)
+    print(f"[调试] 包含高风险字符的蜜罐抓取结果文件生成成功: {high_risk_path}")
+
 except Exception as e:
-    print(f"发生错误: {e}")
+    print(f"[严重错误] 脚本执行过程中发生异常: {e}")
+finally:
+    print("[完成] 数据处理结束。")
