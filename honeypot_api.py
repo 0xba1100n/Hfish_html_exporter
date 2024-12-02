@@ -1,4 +1,4 @@
-import os
+import os 
 import requests
 import json
 import html
@@ -6,18 +6,21 @@ from datetime import datetime
 import urllib3
 import argparse
 from pypinyin import lazy_pinyin
+import openai  # 导入OpenAI模块
 
-# 忽略 SSL 警告
+openai.api_base = "https://api.bianxieai.com/v1"
+ZH_CN = True
+# 禁用SSL警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 def safe_filename(name):
-    """将名称转为拼音，并去除非法字符"""
+    """将名称转换为拼音并去除非法字符"""
     sanitized_name = ''.join(lazy_pinyin(name))
     print(f"[调试] 文件名转换: 原名: {name}, 转换后: {sanitized_name}")
     return sanitized_name
 
 def write_html_header(file, title):
-    """生成 HTML 页头"""
+    """生成HTML页头"""
     file.write("<!DOCTYPE html>\n<html lang='zh-CN'>\n<head>\n")
     file.write("<meta charset='UTF-8'>\n")
     file.write(f"<title>{title}</title>\n")
@@ -35,11 +38,11 @@ def write_html_header(file, title):
     file.write("</head>\n<body>\n")
 
 def write_html_footer(file):
-    """生成 HTML 页脚"""
+    """生成HTML页脚"""
     file.write("</body>\n</html>\n")
 
 def render_attack_info_html(attack_info):
-    """将攻击信息以更可读的方式渲染为 HTML"""
+    """将攻击信息以更可读的方式渲染为HTML"""
     if isinstance(attack_info, str):
         try:
             attack_info = json.loads(attack_info)
@@ -56,10 +59,27 @@ def render_attack_info_html(attack_info):
     html_content += "</table>\n"
     return html_content
 
+def analyze_with_openai(attack_info, openai_api_key):
+    """使用OpenAI API分析攻击信息的细节"""
+    openai.api_key = openai_api_key
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "你是一个用词精确的iot蜜罐结果解释器"},
+                {"role": "user", "content": f"60个字以内，请简单描述一下这次攻击运用什么手法，攻击了哪个组件或者文件，如果有投递持久化用的东西比如投递木马或者sh文件，给出攻击者投递的外部文件下载路径，否则不需要给下载地址 {json.dumps(attack_info, ensure_ascii=False)}"}
+            ]
+        )
+        analysis_result = response['choices'][0]['message']['content']
+        return analysis_result
+    except Exception as e:
+        print(f"[错误] 调用OpenAI API时出错: {e}")
+        return "分析失败: 无法调用OpenAI API"
+
 # 恶意关键字列表
 MALICIOUS_KEYWORDS = [
-    "wget", "curl", "rm -rf", "chmod", "shell", "phpinfo", "system", "eval","execve",
-    "\.cgi", "\.sh", "/etc/passwd", "\.\./\.\./", "entity", "admin", "\<\?", "file://", "ftp","ls -a","uname -a"
+    "wget", "curl", "rm -rf", "chmod", "shell", "phpinfo", "system", "eval",
+    "\.cgi", "\.sh", "/etc/passwd", "\.\./\.\./", "entity", "admin", "\<\?", "file://", "ftp"
 ]
 
 # 请求大小阈值（字节数）
@@ -70,11 +90,13 @@ parser = argparse.ArgumentParser(description="从API获取攻击详情并生成�
 parser.add_argument('--api_key', required=True, help='API密钥')
 parser.add_argument('--hfish_domain', required=True, help='Hfish的域名或IP地址')
 parser.add_argument('--output_dir', required=True, help='HTML文件保存路径')
+parser.add_argument('--openai_api_key', help='OpenAI API密钥')
 args = parser.parse_args()
 
 api_key = args.api_key
 hfish_domain_or_ip = args.hfish_domain.strip()
 output_dir = args.output_dir.strip()
+openai_api_key = args.openai_api_key.strip() if args.openai_api_key else None
 
 # 请求 URL 和通用请求头
 url = f"https://{hfish_domain_or_ip}:4433/api/v1/attack/detail?api_key={api_key}"
@@ -154,6 +176,30 @@ try:
                     any(keyword in url_path for keyword in MALICIOUS_KEYWORDS) or
                     body_length > LARGE_REQUEST_THRESHOLD or url_length > LARGE_REQUEST_THRESHOLD
                 ):
+                    # 使用OpenAI API分析攻击详情，前提是提供了openai_api_key
+                    if openai_api_key:
+                        analysis_result = analyze_with_openai(attack_info, openai_api_key)
+                        attack_info["analysis"] = analysis_result
+                    else:
+                        print("未提供OpenAI API密钥，因此不进行分析。")
+
+                    print(f"服务名: {service_name}, 攻击IP: {detail['attack_ip']}, IP位置: {detail['ip_location']}, 时间: {create_date}")
+                    if (
+                        any(keyword in body for keyword in MALICIOUS_KEYWORDS) or
+                        any(keyword in url_path for keyword in MALICIOUS_KEYWORDS)
+                    ):
+                        print("是恶意攻击请求")
+                        # 描述攻击流程
+                        print("攻击流程: " + render_attack_info_html(attack_info))
+                        # 提取恶意脚本下载路径（如果有）
+                        malicious_script_url = attack_info.get("malicious_script_url")
+                        if malicious_script_url:
+                            print(f"evil url:{malicious_script_url}")
+                        else:
+                            print("evil url:未检测到恶意脚本的下载路径")
+                    else:
+                        print("不是恶意攻击请求")
+                    
                     high_risk_requests.append({
                         "service_name": service_name,
                         "attack_ip": detail["attack_ip"],
@@ -173,74 +219,8 @@ try:
         for date, details in date_data.items():
             print(f"[调试] 日期: {date} 包含 {len(details)} 条记录")
 
-    # 生成总的 index.html
-    index_path = os.path.join(output_dir, "index.html")
-    print(f"[调试] 准备生成总索引文件: {index_path}")
-    with open(index_path, "w", encoding="utf-8") as index_file:
-        write_html_header(index_file, "蜜罐攻击详情索引")
-        index_file.write("<h1>蜜罐攻击详情索引</h1>\n<ul>\n")
-        index_file.write("<h2>包含高风险字符的蜜罐抓取结果</h2>\n")
-        index_file.write(f"<p><a href='high_risk_requests.html'>查看包含高风险字符的蜜罐抓取结果</a></p>\n")
-        index_file.write("<h2>蜜罐种类索引</h2>\n")
-        for service_name in service_date_data.keys():
-            service_dir_name = safe_filename(service_name)
-            index_file.write(f"<li><a href='{service_dir_name}/index.html'>{service_name}</a></li>\n")
-        index_file.write("</ul>\n")
-        write_html_footer(index_file)
-        print(f"[调试] 总索引文件生成成功: {index_path}")
-
-    # 为每个服务生成专属的索引页
-    for service_name, date_data in service_date_data.items():
-        service_dir = os.path.join(output_dir, safe_filename(service_name))
-        if not os.path.exists(service_dir):
-            os.makedirs(service_dir)
-            print(f"[调试] 创建目录: {service_dir}")
-        else:
-            print(f"[调试] 目录已存在: {service_dir}")
-
-        service_index_path = os.path.join(service_dir, "index.html")
-        with open(service_index_path, "w", encoding="utf-8") as service_index_file:
-            write_html_header(service_index_file, f"{service_name} - 攻击详情索引")
-            service_index_file.write(f"<h1>{service_name} - 攻击详情索引</h1>\n<ul>\n")
-            for date in sorted(date_data.keys()):
-                date_file_path = f"{date}.html"
-                service_index_file.write(f"<li><a href='{date_file_path}'>{date}</a></li>\n")
-            service_index_file.write("</ul>\n")
-            write_html_footer(service_index_file)
-        print(f"[调试] 服务索引文件生成成功: {service_index_path}")
-
-    # 生成每个服务的日期 HTML 文件
-    for service_name, date_data in service_date_data.items():
-        service_dir = os.path.join(output_dir, safe_filename(service_name))
-
-        for date, details in date_data.items():
-            file_path = os.path.join(service_dir, f"{date}.html")
-            print(f"[调试] 准备生成文件: {file_path}，包含 {len(details)} 条记录")
-
-            try:
-                with open(file_path, "w", encoding="utf-8") as file:
-                    write_html_header(file, f"{service_name} - {date}")
-                    file.write(f"<h1>{service_name} - {date}</h1>\n<ul>\n")
-                    for detail in details:
-                        attack_ip = detail.get("attack_ip", "N/A")
-                        ip_location = detail.get("ip_location", "N/A")
-                        create_time = datetime.fromtimestamp(detail["create_time"]).strftime("%Y-%m-%d %H:%M:%S")
-                        attack_info = detail.get("attack_info", "")
-
-                        file.write("<li>\n")
-                        file.write(f"<p><strong>攻击IP:</strong> {attack_ip}</p>\n")
-                        file.write(f"<p><strong>IP位置:</strong> {ip_location}</p>\n")
-                        file.write(f"<p><strong>时间:</strong> {create_time}</p>\n")
-                        file.write(render_attack_info_html(attack_info))
-                        file.write("</li>\n")
-                    file.write("</ul>\n")
-                    write_html_footer(file)
-                print(f"[调试] 成功生成文件: {file_path}")
-            except Exception as e:
-                print(f"[错误] 写入文件失败: {file_path}, 异常: {e}")
-
-    # 对包含高风险字符的请求按时间倒序排列
-    high_risk_requests.sort(key=lambda x: x['create_time'], reverse=True)
+    # 对高风险请求按时间从最新到最旧进行排序
+    high_risk_requests.sort(key=lambda x: x["create_time"], reverse=True)
 
     # 生成包含高风险字符的蜜罐抓取结果的 HTML 文件
     high_risk_path = os.path.join(output_dir, "high_risk_requests.html")
